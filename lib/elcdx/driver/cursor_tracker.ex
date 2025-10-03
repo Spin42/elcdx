@@ -49,22 +49,32 @@ defmodule Elcdx.Driver.CursorTracker do
   @doc """
   Updates cursor position after printing text.
 
-  Calculates the new cursor position based on the printed text length
-  and the current scrolling settings.
+  Since we only support single-line printing without wrapping, the cursor
+  position calculation is simplified. The cursor moves forward by the length
+  of the printed text, but stays within the current line bounds.
 
   ## Parameters
 
   - `state`: The driver state struct
-  - `text`: The text that was printed
-  - `opts`: Options including scroll setting
+  - `text`: The text that was printed (newlines are ignored)
+  - `opts`: Options (scroll setting is considered but doesn't affect position)
 
   ## Returns
 
   Updated state with new cursor position.
+
+  ## Behavior
+
+  - Cursor advances by text length within current line
+  - Never moves to next line automatically
+  - Stops at end of current line if text is truncated
+  - Position reflects actual printed characters only
   """
   def update_after_print(state, text, opts) do
+    # Remove newlines since we treat text as single-line
+    clean_text = String.replace(text, ~r/\r?\n/, " ")
+    text_length = String.length(clean_text)
     scroll = Keyword.get(opts, :scroll, true)
-    text_length = String.length(text)
 
     calculate_new_position(state, text_length, scroll)
   end
@@ -72,29 +82,21 @@ defmodule Elcdx.Driver.CursorTracker do
   # Private helper functions
 
   defp calculate_new_position(state, text_length, scroll) do
-    total_position = state.current_column + text_length
+    remaining_space = state.columns - state.current_column
 
-    if scroll do
-      calculate_with_scroll(state, total_position)
-    else
-      calculate_without_scroll(state, total_position)
+    cond do
+      # Text fits completely in remaining space
+      text_length <= remaining_space ->
+        %{state | current_column: state.current_column + text_length}
+
+      # Text is longer but scrolling is enabled - cursor moves to end of line
+      scroll ->
+        %{state | current_column: state.columns - 1}
+
+      # Text is longer and scrolling is disabled - cursor moves by truncated length
+      true ->
+        printed_length = min(text_length, remaining_space)
+        %{state | current_column: state.current_column + printed_length}
     end
-  end
-
-  defp calculate_with_scroll(state, total_position) do
-    new_column = rem(total_position, state.columns)
-    line_offset = div(total_position, state.columns)
-    new_line = min(state.current_line + line_offset, state.lines - 1)
-
-    %{state | current_column: new_column, current_line: new_line}
-  end
-
-  defp calculate_without_scroll(state, total_position) do
-    max_position = state.lines * state.columns - 1
-    clamped_position = min(total_position, max_position)
-    new_column = rem(clamped_position, state.columns)
-    new_line = div(clamped_position, state.columns)
-
-    %{state | current_column: new_column, current_line: new_line}
   end
 end
