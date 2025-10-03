@@ -42,7 +42,7 @@ defmodule Elcdx.MixProject do
 
   defp package do
     [
-      maintainers: ["Marc"],
+      maintainers: ["Marc Lainez (Spin42)"],
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
       files: ~w(lib .formatter.exs mix.exs README* LICENSE* CHANGELOG*)
