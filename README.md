@@ -3,9 +3,9 @@
 [![Hex.pm](https://img.shields.io/hexpm/v/elcdx.svg)](https://hex.pm/packages/elcdx)
 [![Documentation](https://img.shields.io/badge/docs-hexdocs-blue.svg)](https://hexdocs.pm/elcdx)
 
-**Elixir library for communicating with ELCDX LCD display modules via UART.**
+**Elixir library for communicating with Lextronic's ELCD module via UART.**
 
-This library provides a simple and efficient interface for controlling LCD displays that use the ELCD protocol. It supports text display, cursor control, screen management, and scrolling functionality.
+This library provides a simple and efficient interface for controlling Lextronic's LCD display modules that use their ELCD protocol. It supports text display, cursor control, screen management, and scrolling functionality.
 
 ## Installation
 
@@ -64,9 +64,6 @@ Elcdx.stop(lcd)
 ### UART Settings
 
 ```elixir
-# Different baud rate
-{:ok, lcd} = Elcdx.start_link("/dev/ttyS0", speed: 9600)
-
 # Full configuration
 {:ok, lcd} = Elcdx.start_link("/dev/ttyS0",
   speed: 19200,
@@ -103,11 +100,10 @@ Elcdx.stop(lcd)
 ### ELCDX Module Connections
 
 ```
-ELCDX Module    Arduino/Device
+ELCDX Module    Arduino/Device/Rpi
 VCC      <->      5V
 GND      <->      GND
 RX       <->      TX (UART)
-TX       <->      RX (UART)
 ```
 
 ### Supported Devices
@@ -194,7 +190,6 @@ See [CHANGELOG.md](CHANGELOG.md) for a list of changes.
 
 - 📖 [Documentation](https://hexdocs.pm/elcdx)
 - 🐛 [Report Issues](https://github.com/Spin42/elcdx/issues)
-- 💬 [Discussions](https://github.com/Spin42/elcdx/discussions)
 
 ## Acknowledgments
 
