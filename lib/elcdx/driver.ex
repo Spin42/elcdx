@@ -28,6 +28,7 @@ defmodule Elcdx.Driver do
 
   use GenServer
   alias Circuits.UART
+  alias Elcdx.Driver.{Hardware, CursorTracker, TextRenderer}
 
   @type t :: pid()
 
@@ -39,19 +40,15 @@ defmodule Elcdx.Driver do
             current_column: 0,
             current_line: 0
 
-  # UART Protocol Commands
-  @init_cmd <<0xA0>>
-  @clear_cmd <<0xA3, 0x01>>
-  @cursor_off_cmd <<0xA3, 0x0C>>
-  @cursor_on_cmd <<0xA3, 0x0E>>
-  @move_cmd <<0xA1>>
-  @print_line_cmd <<0xA2>>
-
+  # UART Protocol Commands (defined inline in Hardware module)
   # Configuration
   @default_speed 19200
   @default_lines 2
   @default_columns 16
-  @init_delay 600
+
+  # =============================================================================
+  # Public API
+  # =============================================================================
 
   @doc """
   Starts the LCD driver process.
@@ -137,91 +134,56 @@ defmodule Elcdx.Driver do
 
   @impl true
   def init({device, opts}) do
-    speed = Keyword.get(opts, :speed, @default_speed)
-    lines = Keyword.get(opts, :lines, @default_lines)
-    columns = Keyword.get(opts, :columns, @default_columns)
-
-    case UART.start_link() do
-      {:ok, uart} ->
-        case UART.open(uart, device, speed: speed, active: false) do
-          :ok ->
-            state = %__MODULE__{
-              uart: uart,
-              device: device,
-              speed: speed,
-              lines: lines,
-              columns: columns,
-              current_column: 0,
-              current_line: 0
-            }
-
-            case init_display(state) do
-              :ok ->
-                clear_display(state)
-                move_cursor(state, 0, 0)
-                {:ok, state}
-
-              {:error, reason} ->
-                UART.close(uart)
-                {:stop, reason}
-            end
-
-          {:error, reason} ->
-            {:stop, reason}
-        end
-
-      {:error, reason} ->
-        {:stop, reason}
+    with {:ok, state} <- build_initial_state(device, opts),
+         {:ok, uart} <- start_uart_connection(),
+         :ok <- open_uart_device(uart, device, state.speed),
+         :ok <- initialize_lcd_display(%{state | uart: uart}) do
+      final_state = %{state | uart: uart}
+      {:ok, final_state}
+    else
+      {:error, reason} -> {:stop, reason}
     end
   end
 
   @impl true
   def handle_call(:clear, _from, state) do
-    result = clear_display(state)
-    # Reset cursor position after clear
-    new_state = case result do
-      :ok -> %{state | current_column: 0, current_line: 0}
-      {:error, _} -> state
+    case Hardware.clear_display(state) do
+      :ok ->
+        new_state = CursorTracker.reset_position(state)
+        {:reply, :ok, new_state}
+      error ->
+        {:reply, error, state}
     end
-    {:reply, result, new_state}
   end
 
   def handle_call({:move, column, line}, _from, state) do
-    result = move_cursor(state, column, line)
-    new_state = case result do
-      :ok -> %{state | current_column: column, current_line: line}
-      {:error, _} -> state
+    case Hardware.move_cursor(state, column, line) do
+      :ok ->
+        new_state = CursorTracker.set_position(state, column, line)
+        {:reply, :ok, new_state}
+      error ->
+        {:reply, error, state}
     end
-    {:reply, result, new_state}
   end
 
   def handle_call(:cursor_off, _from, state) do
-    result = send_command(state, @cursor_off_cmd)
+    result = Hardware.send_command(state, <<0xA3, 0x0C>>)
     {:reply, result, state}
   end
 
   def handle_call(:cursor_on, _from, state) do
-    result = send_command(state, @cursor_on_cmd)
+    result = Hardware.send_command(state, <<0xA3, 0x0E>>)
     {:reply, result, state}
   end
 
   def handle_call({:print, text, opts}, _from, state) do
-    result = print_text(state, text, opts)
-
-    # Update cursor position after printing
-    new_state = case result do
+    case TextRenderer.print_text(state, text, opts) do
       :ok ->
-        # Calculate new position after printing
-        text_length = String.length(text)
-        new_column = rem(state.current_column + text_length, state.columns)
-        new_line = state.current_line + div(state.current_column + text_length, state.columns)
-        new_line = min(new_line, state.lines - 1)
-        %{state | current_column: new_column, current_line: new_line}
-
-      {:error, _} -> state
+        new_state = CursorTracker.update_after_print(state, text, opts)
+        {:reply, :ok, new_state}
+      error ->
+        {:reply, error, state}
     end
-
-    {:reply, result, new_state}
   end
 
   def handle_call(:stop, _from, state) do
@@ -236,153 +198,35 @@ defmodule Elcdx.Driver do
 
   def terminate(_reason, _state), do: :ok
 
-  defp init_display(%__MODULE__{uart: uart}) do
-    case UART.write(uart, @init_cmd) do
-      :ok ->
-        Process.sleep(@init_delay)
-        :ok
+  # =============================================================================
+  # Initialization Helpers
+  # =============================================================================
 
-      {:error, reason} ->
-        {:error, reason}
-    end
+  defp build_initial_state(device, opts) do
+    state = %__MODULE__{
+      device: device,
+      speed: Keyword.get(opts, :speed, @default_speed),
+      lines: Keyword.get(opts, :lines, @default_lines),
+      columns: Keyword.get(opts, :columns, @default_columns),
+      current_column: 0,
+      current_line: 0
+    }
+    {:ok, state}
   end
 
-  defp clear_display(%__MODULE__{} = state) do
-    send_command(state, @clear_cmd)
+  defp start_uart_connection do
+    UART.start_link()
   end
 
-  defp move_cursor(%__MODULE__{uart: uart}, column, line) do
-    with :ok <- UART.write(uart, @move_cmd),
-         :ok <- UART.write(uart, <<column>>),
-         :ok <- UART.write(uart, <<line>>) do
+  defp open_uart_device(uart, device, speed) do
+    UART.open(uart, device, speed: speed, active: false)
+  end
+
+  defp initialize_lcd_display(state) do
+    with :ok <- Hardware.init_display(state),
+         :ok <- Hardware.clear_display(state),
+         :ok <- Hardware.move_cursor(state, 0, 0) do
       :ok
-    else
-      {:error, reason} -> {:error, reason}
     end
-  end
-
-  defp send_command(%__MODULE__{uart: uart}, command) do
-    UART.write(uart, command)
-  end
-
-  defp print_text(state, text, opts) do
-    show_cursor = Keyword.get(opts, :show_cursor, false)
-    scroll = Keyword.get(opts, :scroll, true)
-
-    with :ok <- set_cursor_visibility(state, show_cursor) do
-      sentences = String.split(text, "\n")
-
-      if length(sentences) > 1 do
-        print_multiline(state, sentences, scroll)
-      else
-        # For simple text, use current cursor position
-        print_at_current_position(state, List.first(sentences), scroll)
-      end
-    end
-  end
-
-  defp set_cursor_visibility(state, true), do: send_command(state, @cursor_on_cmd)
-  defp set_cursor_visibility(state, false), do: send_command(state, @cursor_off_cmd)
-
-  defp print_multiline(state, sentences, scroll) do
-    Enum.with_index(sentences)
-    |> Enum.reduce_while(:ok, fn {sentence, line}, _acc ->
-      result =
-        if line >= state.lines do
-          with :ok <- print_sentence(state, Enum.at(sentences, line - 1), 0, scroll),
-               :ok <- print_sentence(state, sentence, 1, scroll) do
-            :ok
-          end
-        else
-          print_sentence(state, sentence, line, scroll)
-        end
-
-      case result do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-  end
-
-  defp print_line(%__MODULE__{uart: uart}, sentence) do
-    with :ok <- UART.write(uart, @print_line_cmd),
-         :ok <- UART.write(uart, sentence),
-         :ok <- UART.write(uart, <<0x00>>) do
-      :ok
-    else
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp print_sentence(state, sentence, line, scroll) do
-    cond do
-      !scroll or String.length(sentence) <= state.columns ->
-        with :ok <- move_cursor(state, 0, line),
-             :ok <- print_line(state, String.pad_trailing(sentence, state.columns)) do
-          :ok
-        end
-
-      scroll ->
-        with :ok <- move_cursor(state, 0, line),
-             :ok <- print_line(state, String.slice(sentence, 0, state.columns - 1)) do
-          Process.sleep(500)
-          scroll_text(state, sentence, line)
-        end
-    end
-  end
-
-  defp print_at_current_position(state, sentence, scroll) do
-    cond do
-      # If text fits in remaining space on current line
-      !scroll or String.length(sentence) + state.current_column <= state.columns ->
-        print_line(state, sentence)
-
-      # If text is too long and we need to scroll
-      scroll ->
-        # Print what fits on current line
-        remaining_space = state.columns - state.current_column
-        if remaining_space > 0 do
-          first_part = String.slice(sentence, 0, remaining_space)
-          rest_part = String.slice(sentence, remaining_space, String.length(sentence))
-
-          with :ok <- print_line(state, first_part) do
-            # Continue on next line or scroll
-            next_line = min(state.current_line + 1, state.lines - 1)
-            with :ok <- move_cursor(state, 0, next_line) do
-              print_at_current_position(%{state | current_column: 0, current_line: next_line}, rest_part, scroll)
-            end
-          end
-        else
-          # No space on current line, move to next
-          next_line = min(state.current_line + 1, state.lines - 1)
-          with :ok <- move_cursor(state, 0, next_line) do
-            print_at_current_position(%{state | current_column: 0, current_line: next_line}, sentence, scroll)
-          end
-        end
-
-      # No scroll, truncate text
-      true ->
-        remaining_space = state.columns - state.current_column
-        truncated = String.slice(sentence, 0, max(0, remaining_space))
-        print_line(state, truncated)
-    end
-  end
-
-  defp scroll_text(state, sentence, line) do
-    max_scroll = String.length(sentence) - state.columns
-
-    Enum.reduce_while(1..max_scroll, :ok, fn i, _acc ->
-      case move_cursor(state, 0, line) do
-        :ok ->
-          Process.sleep(200)
-          case print_line(state, String.slice(sentence, i, state.columns)) do
-            :ok -> {:cont, :ok}
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
-      end
-    end)
   end
 end
