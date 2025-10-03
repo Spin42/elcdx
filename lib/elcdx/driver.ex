@@ -35,7 +35,9 @@ defmodule Elcdx.Driver do
             device: nil,
             speed: nil,
             lines: 2,
-            columns: 16
+            columns: 16,
+            current_column: 0,
+            current_line: 0
 
   # UART Protocol Commands
   @init_cmd <<0xA0>>
@@ -148,7 +150,9 @@ defmodule Elcdx.Driver do
               device: device,
               speed: speed,
               lines: lines,
-              columns: columns
+              columns: columns,
+              current_column: 0,
+              current_line: 0
             }
 
             case init_display(state) do
@@ -174,12 +178,21 @@ defmodule Elcdx.Driver do
   @impl true
   def handle_call(:clear, _from, state) do
     result = clear_display(state)
-    {:reply, result, state}
+    # Reset cursor position after clear
+    new_state = case result do
+      :ok -> %{state | current_column: 0, current_line: 0}
+      {:error, _} -> state
+    end
+    {:reply, result, new_state}
   end
 
   def handle_call({:move, column, line}, _from, state) do
     result = move_cursor(state, column, line)
-    {:reply, result, state}
+    new_state = case result do
+      :ok -> %{state | current_column: column, current_line: line}
+      {:error, _} -> state
+    end
+    {:reply, result, new_state}
   end
 
   def handle_call(:cursor_off, _from, state) do
@@ -194,7 +207,21 @@ defmodule Elcdx.Driver do
 
   def handle_call({:print, text, opts}, _from, state) do
     result = print_text(state, text, opts)
-    {:reply, result, state}
+
+    # Update cursor position after printing
+    new_state = case result do
+      :ok ->
+        # Calculate new position after printing
+        text_length = String.length(text)
+        new_column = rem(state.current_column + text_length, state.columns)
+        new_line = state.current_line + div(state.current_column + text_length, state.columns)
+        new_line = min(new_line, state.lines - 1)
+        %{state | current_column: new_column, current_line: new_line}
+
+      {:error, _} -> state
+    end
+
+    {:reply, result, new_state}
   end
 
   def handle_call(:stop, _from, state) do
@@ -248,7 +275,8 @@ defmodule Elcdx.Driver do
       if length(sentences) > 1 do
         print_multiline(state, sentences, scroll)
       else
-        print_sentence(state, List.first(sentences), 0, scroll)
+        # For simple text, use current cursor position
+        print_at_current_position(state, List.first(sentences), scroll)
       end
     end
   end
@@ -300,6 +328,43 @@ defmodule Elcdx.Driver do
           Process.sleep(500)
           scroll_text(state, sentence, line)
         end
+    end
+  end
+
+  defp print_at_current_position(state, sentence, scroll) do
+    cond do
+      # If text fits in remaining space on current line
+      !scroll or String.length(sentence) + state.current_column <= state.columns ->
+        print_line(state, sentence)
+
+      # If text is too long and we need to scroll
+      scroll ->
+        # Print what fits on current line
+        remaining_space = state.columns - state.current_column
+        if remaining_space > 0 do
+          first_part = String.slice(sentence, 0, remaining_space)
+          rest_part = String.slice(sentence, remaining_space, String.length(sentence))
+
+          with :ok <- print_line(state, first_part) do
+            # Continue on next line or scroll
+            next_line = min(state.current_line + 1, state.lines - 1)
+            with :ok <- move_cursor(state, 0, next_line) do
+              print_at_current_position(%{state | current_column: 0, current_line: next_line}, rest_part, scroll)
+            end
+          end
+        else
+          # No space on current line, move to next
+          next_line = min(state.current_line + 1, state.lines - 1)
+          with :ok <- move_cursor(state, 0, next_line) do
+            print_at_current_position(%{state | current_column: 0, current_line: next_line}, sentence, scroll)
+          end
+        end
+
+      # No scroll, truncate text
+      true ->
+        remaining_space = state.columns - state.current_column
+        truncated = String.slice(sentence, 0, max(0, remaining_space))
+        print_line(state, truncated)
     end
   end
 

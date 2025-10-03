@@ -70,7 +70,7 @@ defmodule Elcdx do
 
   ## Example
 
-      Elcdxxx.clear(lcd)
+      Elcdx.clear(lcd)
 
   """
   @spec clear(t()) :: :ok | {:error, term()}
